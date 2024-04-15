@@ -769,7 +769,7 @@ class DreamBoothDataset(Dataset):
     
         # ADDED
         facemask, bbox = get_background_pixels_and_bbox(instance_image, mask_parts=['background', 'others'], bbox_padding=0)
-        #facemask, bbox = get_background_pixels_and_bbox(instance_image, mask_parts=['hair', 'skin', 'face', 'clothing'], bbox_padding=0)
+        # facemask, bbox = get_background_pixels_and_bbox(instance_image, mask_parts=['hair', 'skin', 'face', 'clothing'], bbox_padding=0)
         face_image = instance_image.crop(bbox)
 
         example["instance_images"] = self.image_transforms(instance_image)
@@ -1378,9 +1378,8 @@ def main(args):
                 if vae is not None:
                     # Convert images to latent space
                     model_input = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                    model_input = model_input * vae.config.scaling_factor
-
-
+                    #model_input = model_input * vae.config.scaling_factor
+                    
                     # ADDED 
                     encoded_masks = vae.encode(masks).latent_dist.sample()
 
@@ -1392,8 +1391,7 @@ def main(args):
                     # take the threshold of the encoded and normalized masks
                     # then multiply by a large number
                     threshold = 0.5
-                    # multiplying by  number makes it more green too, but also gets rid of non-pure-black BG
-                    encoded_masks = (encoded_masks <= threshold).float() * 10
+                    encoded_masks = (encoded_masks <= threshold).float() # * 4
                     
 
 
@@ -1469,32 +1467,40 @@ def main(args):
                 # Compute instance loss
                 if args.snr_gamma is None:
 
-
                     # ADDED
                     
                     # norm model pred
-                    min_val_img = model_pred.min()
-                    max_val_img = model_pred.max()
-                    normalized_model_pred = (model_pred - min_val_img) / (max_val_img - min_val_img)
-                    # mult
-                    multiplied_pred = encoded_masks * normalized_model_pred
+                    # min_val_img1 = model_pred.min()
+                    # max_val_img1 = model_pred.max()
+                    # normalized_model_pred = (model_pred - min_val_img1) / (max_val_img1 - min_val_img1)
+                    # # mult
+                    # multiplied_pred = encoded_masks * normalized_model_pred
 
-                    # norm target
-                    min_val_img = target.min()
-                    max_val_img = target.max()
-                    normalized_target = (target - min_val_img) / (max_val_img - min_val_img)
-                    # mult
-                    multiplied_target = encoded_masks * normalized_target
+                    # # norm target
+                    # min_val_img2 = target.min()
+                    # max_val_img2 = target.max()
+                    # normalized_target = (target - min_val_img2) / (max_val_img2 - min_val_img2)
+                    # # mult
+                    # multiplied_target = encoded_masks * normalized_target
+
+                    # # "unnormalize" the results
+
+                    # multiplied_pred = multiplied_pred * (max_val_img1 - min_val_img1) + min_val_img1
+                    # multiplied_target = multiplied_target * (max_val_img2 - min_val_img2) + min_val_img1
+
+                    encoded_masks = encoded_masks * vae.config.scaling_factor
+                    multiplied_pred = encoded_masks * model_pred
+                    multiplied_target = encoded_masks * target
+
+                    # scale them back
+                    # multiplied_pred = multiplied_pred * vae.config.scaling_factor
+                    # multiplied_target = multiplied_target * vae.config.scaling_factor
 
 
-
-                    # this makes the mask more "clear"
-                    # if you remove it or just multiply by itself once, it gets more blurry
+                    # # this makes the mask more "clear"
+                    # # if you remove it or just multiply by itself once, it gets more blurry
                     # multiplied_pred = multiplied_pred * multiplied_pred #* multiplied_pred
                     # multiplied_target = multiplied_target * multiplied_target # * multiplied_target
-
-
-
 
                     loss = F.mse_loss(multiplied_pred, multiplied_target, reduction='mean')
 
