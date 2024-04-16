@@ -768,8 +768,8 @@ class DreamBoothDataset(Dataset):
             instance_image = instance_image.convert("RGB")
     
         # ADDED
-        facemask, bbox = get_background_pixels_and_bbox(instance_image, mask_parts=['background', 'others'], bbox_padding=0)
-        # facemask, bbox = get_background_pixels_and_bbox(instance_image, mask_parts=['hair', 'skin', 'face', 'clothing'], bbox_padding=0)
+        # facemask, bbox = get_background_pixels_and_bbox(instance_image, mask_parts=['background', 'others'], bbox_padding=0)
+        facemask, bbox = get_background_pixels_and_bbox(instance_image, mask_parts=['hair', 'skin', 'face', 'clothing'], bbox_padding=0)
         face_image = instance_image.crop(bbox)
 
         example["instance_images"] = self.image_transforms(instance_image)
@@ -840,8 +840,15 @@ def collate_fn(examples, with_prior_preservation=False, save_dir="processed_imag
             mask = mask.unsqueeze(0)
         if mask.size(0) == 1:
             mask = mask.repeat(3, 1, 1)
+
+
+        mask = (mask > 0.5).float()
+
+        
         processed_masks.append(mask)
         # save_image(mask.float(), os.path.join(save_dir, f"mask_{idx}.png"))
+
+    
     processed_masks = torch.stack(processed_masks, dim=0)
 
     # for idx, (pixel, face) in enumerate(zip(pixel_values, faces)):
@@ -928,6 +935,12 @@ def tokenize_prompt(tokenizer, prompt, tokenizer_max_length=None):
     )
 
     return text_inputs
+
+
+
+
+
+
 
 
 def encode_prompt(text_encoder, input_ids, attention_mask, text_encoder_use_attention_mask=None):
@@ -1374,25 +1387,48 @@ def main(args):
     
                 # ADDED
                 masks = batch["masks"].to(device=pixel_values.device, dtype=weight_dtype)
+                resized_masks = F.interpolate(masks, size=(64,64), mode='bilinear', align_corners=False)
+                last_channel = resized_masks[:, -1:, :, :]
+                resized_masks = torch.cat((resized_masks, last_channel), dim=1)
+
+
+
+        
                 
                 if vae is not None:
                     # Convert images to latent space
                     model_input = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
-                    #model_input = model_input * vae.config.scaling_factor
+                    model_input = model_input * vae.config.scaling_factor
+
+
+
+
+                
+
+
+
                     
                     # ADDED 
-                    encoded_masks = vae.encode(masks).latent_dist.sample()
+                    # encoded_masks = vae.encode(masks).latent_dist.sample()
+                    # encoded_masks = encoded_masks * vae.config.scaling_factor
 
-                    # norm
-                    min_val = encoded_masks.min()
-                    max_val = encoded_masks.max()
-                    encoded_masks = (encoded_masks - min_val) / (max_val - min_val)
+
+
+
+
+
+
+                
+                    # # norm
+                    # min_val = encoded_masks.min()
+                    # max_val = encoded_masks.max()
+                    # encoded_masks = (encoded_masks - min_val) / (max_val - min_val)
 
                     # take the threshold of the encoded and normalized masks
                     # then multiply by a large number
-                    threshold = 0.5
-                    encoded_masks = (encoded_masks <= threshold).float() # * 4
-                    
+                    # threshold = 0.5
+                    # encoded_masks = (encoded_masks <= threshold).float()
+
 
 
                 else:
@@ -1467,7 +1503,68 @@ def main(args):
                 # Compute instance loss
                 if args.snr_gamma is None:
 
-                    # ADDED
+
+                    
+                    
+                
+
+                    # encoded_masks = encoded_masks * vae.config.scaling_factor
+
+                    # # # norm
+                    # # min_val = encoded_masks.min()
+                    # # max_val = encoded_masks.max()
+                    # # encoded_masks = (encoded_masks - min_val) / (max_val - min_val)
+
+                    
+                    # # threshold = 0.5
+                    # # encoded_masks = (encoded_masks <= threshold).float()
+
+
+                    # squared_diff = (model_pred - target) ** 2
+                    # masked_squared_diff = squared_diff * encoded_masks
+                    # loss = torch.mean(masked_squared_diff)
+
+                
+
+
+                    # squared_diff = (model_pred - target) ** 2
+                    # masked_squared_diff = squared_diff * encoded_masks
+                    # loss = torch.mean(masked_squared_diff)
+
+
+
+
+                    loss = F.mse_loss(model_pred * resized_masks, target * resized_masks, reduction='mean')
+                    
+                    # squared_diff = (model_pred - target) ** 2
+                    # masked_squared_diff = squared_diff * resized_masks
+                    # masked_elements = masked_squared_diff[resized_masks.bool()]
+
+
+                    
+                    
+                    # if masked_elements.numel() > 0:
+                    #     loss = torch.mean(masked_elements)
+                    # else:
+                    #     loss = torch.tensor(0.0).to(masked_elements.device)
+
+
+                        #                  # Blending from https://omriavrahami.com/blended-latent-diffusion-page/
+        #     noise_source_latents = self.scheduler.add_noise( 
+        #         source_latents, torch.randn_like(latents), t
+        #     )
+        #     latents = latents * latent_mask + noise_source_latents * (1 - latent_mask)
+
+        # latents = 1 / 0.18215 * latents
+
+
+
+
+
+                
+                
+
+                                    # ADDED
                     
                     # # norm model pred
                     # min_val_img1 = model_pred.min()
@@ -1483,14 +1580,13 @@ def main(args):
                     # # mult
                     # multiplied_target = encoded_masks * normalized_target
 
-                    # # "unnormalize" the results
+                    # "unnormalize" the results
 
                     # multiplied_pred = multiplied_pred * (max_val_img1 - min_val_img1) + min_val_img1
                     # multiplied_target = multiplied_target * (max_val_img2 - min_val_img2) + min_val_img2
 
-                    # # encoded_masks = encoded_masks * vae.config.scaling_factor
-                    # # multiplied_pred = encoded_masks * model_pred
-                    # # multiplied_target = encoded_masks * target
+                    # multiplied_pred = multiplied_pred * multiplied_pred
+                    # multiplied_target = multiplied_target * multiplied_target
 
                     # # scale them back
                     # multiplied_pred = multiplied_pred * vae.config.scaling_factor
@@ -1500,36 +1596,20 @@ def main(args):
                     
 
                     
-                    # loss = F.mse_loss(multiplied_pred, multiplied_target, reduction='mean')
-
-                    squared_diffs = (model_pred - target) ** 2
-
-                    min_val_img = squared_diffs.min()
-                    max_val_img = squared_diffs.max()
-                    normalized = (squared_diffs - min_val_img) / (max_val_img - min_val_img)
-
-                    multiplied_latents = encoded_masks * normalized
-
-
-
-                    # multiplied_latents = multiplied_latents * (max_val_img - min_val_img) + min_val_img
-
-
-                    # masked_squared_diffs = multiplied_latents * vae.config.scaling_factor
-
-                    masked_squared_diffs = multiplied_latents
-
-
-                    # masked_squared_diffs = squared_diffs * encoded_masks
-
-
+                    # multiplied_pred = encoded_masks * model_pred
+                    # multiplied_target = encoded_masks * target
                     
-                    active = torch.sum(encoded_masks > 0).float()
-                    if active > 0:
-                        loss = torch.sum(masked_squared_diffs) / active
-                    else:
-                        loss = torch.tensor(0.0)
+                    # loss = F.mse_loss(model_pred * encoded_masks, target * encoded_masks, reduction='mean')
 
+                    # squared_diffs = (model_pred - target) ** 2
+
+                    # min_val_img = squared_diffs.min()
+                    # max_val_img = squared_diffs.max()
+                    # normalized = (squared_diffs - min_val_img) / (max_val_img - min_val_img)
+
+                    # multiplied_latents = encoded_masks * normalized
+                    
+                
                 else:
                     # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
                     # Since we predict the noise instead of x_0, the original formulation is slightly changed.
