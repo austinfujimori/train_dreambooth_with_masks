@@ -1469,7 +1469,7 @@ def main(args):
 
                     # ADDED
                     
-                    # norm model pred
+                    # # norm model pred
                     # min_val_img1 = model_pred.min()
                     # max_val_img1 = model_pred.max()
                     # normalized_model_pred = (model_pred - min_val_img1) / (max_val_img1 - min_val_img1)
@@ -1486,23 +1486,49 @@ def main(args):
                     # # "unnormalize" the results
 
                     # multiplied_pred = multiplied_pred * (max_val_img1 - min_val_img1) + min_val_img1
-                    # multiplied_target = multiplied_target * (max_val_img2 - min_val_img2) + min_val_img1
+                    # multiplied_target = multiplied_target * (max_val_img2 - min_val_img2) + min_val_img2
 
-                    encoded_masks = encoded_masks * vae.config.scaling_factor
-                    multiplied_pred = encoded_masks * model_pred
-                    multiplied_target = encoded_masks * target
+                    # # encoded_masks = encoded_masks * vae.config.scaling_factor
+                    # # multiplied_pred = encoded_masks * model_pred
+                    # # multiplied_target = encoded_masks * target
 
-                    # scale them back
+                    # # scale them back
                     # multiplied_pred = multiplied_pred * vae.config.scaling_factor
                     # multiplied_target = multiplied_target * vae.config.scaling_factor
 
 
-                    # # this makes the mask more "clear"
-                    # # if you remove it or just multiply by itself once, it gets more blurry
-                    # multiplied_pred = multiplied_pred * multiplied_pred #* multiplied_pred
-                    # multiplied_target = multiplied_target * multiplied_target # * multiplied_target
+                    
 
-                    loss = F.mse_loss(multiplied_pred, multiplied_target, reduction='mean')
+                    
+                    # loss = F.mse_loss(multiplied_pred, multiplied_target, reduction='mean')
+
+                    squared_diffs = (model_pred - target) ** 2
+
+                    min_val_img = squared_diffs.min()
+                    max_val_img = squared_diffs.max()
+                    normalized = (squared_diffs - min_val_img) / (max_val_img - min_val_img)
+
+                    multiplied_latents = encoded_masks * normalized
+
+
+
+                    # multiplied_latents = multiplied_latents * (max_val_img - min_val_img) + min_val_img
+
+
+                    # masked_squared_diffs = multiplied_latents * vae.config.scaling_factor
+
+                    masked_squared_diffs = multiplied_latents
+
+
+                    # masked_squared_diffs = squared_diffs * encoded_masks
+
+
+                    
+                    active = torch.sum(encoded_masks > 0).float()
+                    if active > 0:
+                        loss = torch.sum(masked_squared_diffs) / active
+                    else:
+                        loss = torch.tensor(0.0)
 
                 else:
                     # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
