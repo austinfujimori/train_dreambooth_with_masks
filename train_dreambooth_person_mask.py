@@ -59,16 +59,6 @@ from diffusers.utils.import_utils import is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 
 
-# ADDED
-
-from PIL import Image, ImageFilter, ImageOps
-import numpy as np
-import mediapipe as mp
-from diffusers import AutoencoderKL
-
-vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse")
-
-
 
 
 if is_wandb_available():
@@ -757,6 +747,17 @@ class DreamBoothDataset(Dataset):
             ]
         )
 
+        # ADDED
+        self.image_transforms_mask = transforms.Compose(
+            [
+                transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
+                transforms.ToTensor(),
+                # transforms.Normalize([0.9], [1])
+            ]
+        )
+
+
     def __len__(self):
         return self._length
 
@@ -775,7 +776,7 @@ class DreamBoothDataset(Dataset):
         example["instance_images"] = self.image_transforms(instance_image)
 
         # ADDED
-        example["masks"] = self.image_transforms(facemask)
+        example["masks"] = self.image_transforms_mask(facemask)
         example["instance_faces"] = self.image_transforms(face_image)
     
         # Add instance prompt IDs and attention mask
@@ -818,8 +819,8 @@ import torchvision.transforms as transforms
 from torchvision.utils import save_image
 
 def collate_fn(examples, with_prior_preservation=False, save_dir="processed_images"):
-    # if not os.path.exists(save_dir):
-    #     os.makedirs(save_dir)  # Create save directory if it doesn't exist
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)  # Create save directory if it doesn't exist
 
     has_attention_mask = "instance_attention_mask" in examples[0]
     input_ids = [example["instance_prompt_ids"] for example in examples]
@@ -836,17 +837,14 @@ def collate_fn(examples, with_prior_preservation=False, save_dir="processed_imag
     # ADDED
     processed_masks = []
     for idx, mask in enumerate(masks):
-        if mask.dim() == 2:
-            mask = mask.unsqueeze(0)
-        if mask.size(0) == 1:
-            mask = mask.repeat(3, 1, 1)
 
 
-        mask = (mask > 0.5).float()
 
-        
+        # this changes the output of the mask for some reason
+        # mask = (mask > 0.5).float() #* 255 #or 1000
+
         processed_masks.append(mask)
-        # save_image(mask.float(), os.path.join(save_dir, f"mask_{idx}.png"))
+        save_image(mask, os.path.join(save_dir, f"mask_{idx}.png"))
 
     
     processed_masks = torch.stack(processed_masks, dim=0)
@@ -1376,6 +1374,11 @@ def main(args):
         disable=not accelerator.is_local_main_process,
     )
 
+
+    
+
+
+
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
         if args.train_text_encoder:
@@ -1387,15 +1390,17 @@ def main(args):
     
                 # ADDED
                 masks = batch["masks"].to(device=pixel_values.device, dtype=weight_dtype)
-                resized_masks = F.interpolate(masks, size=(64,64), mode='bilinear', align_corners=False)
-                last_channel = resized_masks[:, -1:, :, :]
-                resized_masks = torch.cat((resized_masks, last_channel), dim=1)
 
+                # resized_masks = F.interpolate(masks, size=(64,64), mode='bilinear', align_corners=False)
+                # last_channel = resized_masks[:, -1:, :, :]
+                # resized_masks = torch.cat((resized_masks, last_channel), dim=1)
 
-
-        
                 
                 if vae is not None:
+                    # from diffusers import AutoencoderKL
+                    # vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse")
+
+                    
                     # Convert images to latent space
                     model_input = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                     model_input = model_input * vae.config.scaling_factor
@@ -1409,25 +1414,22 @@ def main(args):
 
                     
                     # ADDED 
-                    # encoded_masks = vae.encode(masks).latent_dist.sample()
-                    # encoded_masks = encoded_masks * vae.config.scaling_factor
+                    encoded_masks = vae.encode(masks).latent_dist.sample()
+
+                    #encoded_masks = encoded_masks * vae.config.scaling_factor
 
 
 
 
-
-
-
-                
-                    # # norm
+                    # norm
                     # min_val = encoded_masks.min()
                     # max_val = encoded_masks.max()
                     # encoded_masks = (encoded_masks - min_val) / (max_val - min_val)
 
-                    # take the threshold of the encoded and normalized masks
-                    # then multiply by a large number
+                    # # take the threshold of the encoded and normalized masks
+                    # # then multiply by a large number
                     # threshold = 0.5
-                    # encoded_masks = (encoded_masks <= threshold).float()
+                    # encoded_masks = (encoded_masks > threshold).float()
 
 
 
@@ -1508,33 +1510,61 @@ def main(args):
                     
                 
 
-                    # encoded_masks = encoded_masks * vae.config.scaling_factor
-
-                    # # # norm
-                    # # min_val = encoded_masks.min()
-                    # # max_val = encoded_masks.max()
-                    # # encoded_masks = (encoded_masks - min_val) / (max_val - min_val)
+                    # # norm
+                    # min_val = encoded_masks.min()
+                    # max_val = encoded_masks.max()
+                    # encoded_masks = (encoded_masks - min_val) / (max_val - min_val)
 
                     
-                    # # threshold = 0.5
-                    # # encoded_masks = (encoded_masks <= threshold).float()
+                    # threshold = 0.5
+                    # encoded_masks = (encoded_masks <= threshold).float()
+
+
+
+                    
+
+                    os.makedirs("images", exist_ok=True)
+                    
+                    # Save encoded masks
+                    for i, mask in enumerate(encoded_masks):
+                        decoded_mask = vae.decode(mask.unsqueeze(0)).sample[0]
+                        mask_normalized = (decoded_mask - decoded_mask.min()) / (decoded_mask.max() - decoded_mask.min())
+                        mask_normalized = mask_normalized.squeeze().permute(1, 2, 0).cpu().detach().numpy() * 255
+                        mask_pil = Image.fromarray(mask_normalized.astype('uint8'))
+                        mask_pil.save(os.path.join("images", f'mask_{i}.png'))
+
+                    # for i, targ in enumerate(target):
+                    #     decoded_mask = vae.decode(targ.unsqueeze(0)).sample[0]
+                    #     mask_normalized = (decoded_mask - decoded_mask.min()) / (decoded_mask.max() - decoded_mask.min())
+                    #     mask_normalized = mask_normalized.squeeze().permute(1, 2, 0).cpu().detach().numpy() * 255
+                    #     mask_pil = Image.fromarray(mask_normalized.astype('uint8'))
+                    #     mask_pil.save(os.path.join("images", f'target_{i}.png'))
+
+
 
 
                     # squared_diff = (model_pred - target) ** 2
                     # masked_squared_diff = squared_diff * encoded_masks
                     # loss = torch.mean(masked_squared_diff)
+
+                    # encoded_masks = encoded_masks / encoded_masks.max()
+                    # encoded_masks = encoded_masks * vae.config.scaling_factor
+
 
                 
+                    # loss = (
+                    #     F.mse_loss(model_pred * encoded_masks, target * encoded_masks, reduction="none")
+                    #     .mean([1, 2, 3])
+                    #     .mean()
+                    # )
+
+                    
+                    loss = F.mse_loss(model_pred * encoded_masks, target * encoded_masks, reduction='mean')
 
 
-                    # squared_diff = (model_pred - target) ** 2
-                    # masked_squared_diff = squared_diff * encoded_masks
-                    # loss = torch.mean(masked_squared_diff)
 
 
-
-
-                    loss = F.mse_loss(model_pred * resized_masks, target * resized_masks, reduction='mean')
+                
                     
                     # squared_diff = (model_pred - target) ** 2
                     # masked_squared_diff = squared_diff * resized_masks
