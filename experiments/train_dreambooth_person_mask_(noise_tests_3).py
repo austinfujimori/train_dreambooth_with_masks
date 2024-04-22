@@ -767,14 +767,6 @@ class DreamBoothDataset(Dataset):
                 transforms.Normalize([0.5], [0.5]),
             ]
         )
-        self.image_transforms_norm_mask = transforms.Compose(
-            [
-                #0.2,0.8
-                #transforms.Normalize([0.05], [0.95]),
-                transforms.Normalize([0.3333], [0.6667]),
-            ]
-        )
-
 
         self.image_transforms_mask = transforms.Compose(
             [
@@ -792,14 +784,13 @@ class DreamBoothDataset(Dataset):
         example = {}
         instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
         instance_image = exif_transpose(instance_image)
-
+    
         # ADDED
         facemask, bbox = get_background_pixels_and_bbox(instance_image, mask_parts=['hair', 'skin', 'face', 'clothing'], bbox_padding=0)
         facemask_tensor = self.image_transforms_mask(facemask)
 
         # don't wanna norm yet we'll do it after applying our noise cuz it could mess things up
         instance_image_tensor = self.image_transforms_no_norm(instance_image)
-
 
         # ERODING FACE MASK
         struct_elem = np.ones((6, 6), dtype=np.bool_)
@@ -809,9 +800,12 @@ class DreamBoothDataset(Dataset):
         eroded_edge_mask[eroded_mask] = [255, 255, 255]
         eroded_edge_mask_image = Image.fromarray(eroded_edge_mask)
         eroded_facemask_tensor = self.image_transforms_mask(eroded_edge_mask_image)
-        
 
-                
+
+        # set the facemask to the eroded facemask
+        facemask_tensor = eroded_facemask_tensor
+
+        
         # BLUR THE ERODED MASK A LITTLE
         blurred_eroded_edge_mask = np.copy(eroded_edge_mask)
         gray_image = cv2.cvtColor(blurred_eroded_edge_mask, cv2.COLOR_RGB2GRAY)
@@ -822,12 +816,81 @@ class DreamBoothDataset(Dataset):
         blurred_eroded_edge_mask_image = Image.fromarray(blurred_eroded_edge_mask)
         blurred_eroded_facemask_tensor = self.image_transforms_mask(blurred_eroded_edge_mask_image)
 
+
+        
+        
+        # BG NOISE (0 to 1)
+        noise = torch.randn_like(instance_image_tensor)
+        noise_min = noise.min()
+        noise_max = noise.max()
+        # Normalize the noise between 0 and 1
+        background_noise = (noise - noise_min) / (noise_max - noise_min)
+        noise_scale = 0.5
+        background_noise = background_noise * noise_scale
+        
+        # SMALL NOISE (-0.5 to 0.5)
+        noise = torch.randn_like(instance_image_tensor)
+        noise_min = noise.min()
+        noise_max = noise.max()
+        # Normalize the noise between -0.5 and 0.5, since we don't want to only add as that will just increase brightness of pixs
+        small_noise = (noise - (noise_max + noise_min) / 2) / ((noise_max - noise_min) / 2)
+        # tried 0.05, 0.2
+        noise_scale = 0.01
+        small_noise = noise_scale * small_noise
+        
+
+        # EDGE MASK METHOD
+        # create edge mask to add small_noise
+        # we want to create kind of a thick edge mask where we will multiply it against the small_noise then add to our instance_image
+        # thickness of the edge
+
+        # # using eroded pixel mask instead of default face pixel mask to create edge mask
+        # # small difference though depending on how thick you want the edges
+        # struct_elem_edge = np.ones((10, 10), dtype=np.bool_)
+        # dilated_mask = binary_dilation(eroded_mask, struct_elem_edge)
+        # reeroded_mask = binary_erosion(eroded_mask, struct_elem_edge)
+        # thick_edge_mask = dilated_mask & ~reeroded_mask
+        # rgb_edge_mask = np.zeros_like(np.array(instance_image))
+        # rgb_edge_mask[thick_edge_mask] = [255, 255, 255]
+        # edgemask_image = Image.fromarray(rgb_edge_mask)
+        # edgemask_tensor = self.image_transforms_mask(edgemask_image)
+
+        struct_elem = np.ones((10, 10), dtype=np.bool_)
+        mask_array = np.any(np.array(facemask) != [0, 0, 0], axis=-1)
+        dilated_mask = binary_dilation(mask_array, struct_elem)
+        eroded_mask = binary_erosion(mask_array, struct_elem)
+        edge_mask = dilated_mask & ~eroded_mask
+        rgb_edge_mask = np.zeros_like(np.array(instance_image))
+        rgb_edge_mask[edge_mask] = [255, 255, 255]
+        edgemask_image = Image.fromarray(rgb_edge_mask)
+        edgemask_tensor = self.image_transforms_mask(edgemask_image)
+
+
+
+        # may want to change this to just eroded_facemask_tensor => facemask_tensor
+        background_mask = 1 - blurred_eroded_facemask_tensor
+
+        instance_image_tensor = instance_image_tensor * blurred_eroded_facemask_tensor.float() + background_noise * background_mask.float() #+ small_noise * edgemask_tensor.float()
+
+
+
+        # clamp only at max, then take abs val of all the negative BG noises bc we don't wanna set them to 0
+        instance_image_tensor = torch.clamp(instance_image_tensor, max=1)
+        instance_image_tensor = torch.abs(instance_image_tensor)
+
+
+        
+        save_image(instance_image_tensor, os.path.join("masks", "instanceimage.jpg"), format='JPEG')
+        save_image(eroded_facemask_tensor, os.path.join("masks", "erodedfacemask(andblurred).jpg"), format='JPEG')
+        save_image(facemask_tensor, os.path.join("masks", "erodedfacemask.jpg"), format='JPEG')
+        
+
+        # then we can clamp and finally normalize our tensor
+        instance_image_tensor = self.image_transforms_norm(instance_image_tensor)
+
         
         example["instance_images"] = instance_image_tensor
-        example["blurred_masks"] = blurred_eroded_facemask_tensor
-        example["masks"] = eroded_facemask_tensor
-        #eroded_facemask_tensor 
-        # self.image_transforms_norm_mask(eroded_facemask_tensor)
+        example["masks"] = facemask_tensor
 
 
 
@@ -905,7 +968,6 @@ def collate_fn(examples, with_prior_preservation=False, save_dir="processed_imag
         "pixel_values": pixel_values,
 
         # ADDED
-        "blurred_masks": torch.stack([example["blurred_masks"] for example in examples]),
         "masks": torch.stack([example["masks"] for example in examples])
     }
 
@@ -1404,62 +1466,10 @@ def main(args):
     )
 
 
-
-
-
-
-
-
-    
-    # ADDED
-
-    
-    def process_single_image(instance_image_tensor, blurred_mask):
-        # instance_image_tensor and facemask tensor has H,W 512x512 with vals between 0 and 1
-
-        # facemask has already been eroded and blurred in getitem
-
-        # all we will do is alter the instance image, we want to generate noise in the BG
-        # 1. BG mask is 1 - facemask
-        # 2. generate BG noise
-        # 3. facemask * instance_image_tensor + noise * BG mask
-        
-
-        # BG MASK
-        background_mask = 1 - blurred_mask
-
-        # BG Noise
-        noise = torch.randn_like(instance_image_tensor)
-        noise_min = noise.min()
-        noise_max = noise.max()
-        # Normalize the noise between 0 and 1
-        background_noise = (noise - noise_min) / (noise_max - noise_min)
-
-        # tried 0.5, 0.9, 0.1
-        noise_scale = 0.5
-        background_noise = background_noise * noise_scale
-
-        # Ops
-        instance_image_tensor = instance_image_tensor * blurred_mask.float() + background_noise * background_mask.float()
-
-
-        save_path = os.path.join("masks", f"processed_image.png")
-        save_image(instance_image_tensor, save_path)
-
-        # then we can norm between -1 and 1 instead of 0,1
-        instance_image_tensor = (instance_image_tensor - 0.5) * 2
-        
-        return instance_image_tensor
     
 
 
 
-
-
-
-
-
-    
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
         if args.train_text_encoder:
@@ -1467,26 +1477,11 @@ def main(args):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
 
+                pixel_values = batch["pixel_values"].to(dtype=weight_dtype)
 
-                # ADDED
-
-                # now let's perform the operations here
-                pixel_values = batch["pixel_values"]
-                blurred_masks = batch["blurred_masks"]
-                masks = batch["masks"]
-
-                processed_images = []
-                for i in range(pixel_values.size(0)):
-                    # (if you want blur, pass in blurred masks instead of masks)
-                    processed_image = process_single_image(pixel_values[i], masks[i]) # blurred_masks[i]) 
-                    processed_images.append(processed_image)
                 
-                pixel_values = torch.stack(processed_images)
-
-
-
                 if vae is not None:
-                    model_input = vae.encode(pixel_values.to(dtype=weight_dtype)).latent_dist.sample()
+                    model_input = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                     model_input = model_input * vae.config.scaling_factor
 
 
@@ -1580,7 +1575,7 @@ def main(args):
                         .mean()
                     )
 
-                    # loss = F.mse_loss(model_pred, target, reduction='mean')
+                    # loss = F.mse_loss(model_pred * masks, target * masks, reduction='mean')
 
                 
                 else:
