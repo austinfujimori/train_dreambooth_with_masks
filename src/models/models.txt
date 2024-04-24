@@ -1,4 +1,0 @@
-selfie_multiclass from mediapipe
-
-
-Realisticvision
