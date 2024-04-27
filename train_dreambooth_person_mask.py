@@ -767,14 +767,6 @@ class DreamBoothDataset(Dataset):
                 transforms.Normalize([0.5], [0.5]),
             ]
         )
-        self.image_transforms_norm_mask = transforms.Compose(
-            [
-                #0.2,0.8
-                #transforms.Normalize([0.05], [0.95]),
-                transforms.Normalize([0.3333], [0.6667]),
-            ]
-        )
-
 
         self.image_transforms_mask = transforms.Compose(
             [
@@ -798,6 +790,10 @@ class DreamBoothDataset(Dataset):
         # weigh the clothes less so we want the strenghth to be less for clothes
         # 1.0 for face an skin
         # < 1.0 for clothes
+        # 0.3 too large
+        # 0.05 good, but still fits too much @ 1500 steps
+        # 0.01 still fits and messes up face since we eliminate too many neurons
+        # lets go back to 0.3, since it generated good faces.
         clothes_scale = 0.3
         
         facemask, bbox = get_background_pixels_and_bbox(instance_image, mask_parts=['hair', 'skin', 'face'], bbox_padding=0)
@@ -845,12 +841,12 @@ class DreamBoothDataset(Dataset):
 
 
 
-        # visualize to ensure these ops are being performed correctly
-        visualization_folder = "visualization_images"
-        os.makedirs(visualization_folder, exist_ok=True)
-        save_image(blurred_combined_mask_tensor, os.path.join(visualization_folder, f"facemask_blurring.png"))
-        save_image(combined_mask_tensor, os.path.join(visualization_folder, f"facemask_erosion.png"))
-        save_image(facemask_tensor, os.path.join(visualization_folder, f"facemask.png"))
+        # # visualize to ensure these ops are being performed correctly
+        # visualization_folder = "visualization_images"
+        # os.makedirs(visualization_folder, exist_ok=True)
+        # save_image(blurred_combined_mask_tensor, os.path.join(visualization_folder, f"facemask_blurring.png"))
+        # save_image(combined_mask_tensor, os.path.join(visualization_folder, f"facemask_erosion.png"))
+        # save_image(facemask_tensor, os.path.join(visualization_folder, f"facemask.png"))
         
         
         example["instance_images"] = instance_image_tensor
@@ -1456,7 +1452,7 @@ def main(args):
         # BG MASK
         background_mask = 1 - blurred_mask
 
-        # BG Noise
+        # BG Noise4
         noise = torch.randn_like(instance_image_tensor)
         noise_min = noise.min()
         noise_max = noise.max()
@@ -1464,7 +1460,8 @@ def main(args):
         background_noise = (noise - noise_min) / (noise_max - noise_min)
 
         # tried 0.5, 0.9, 0.1
-        noise_scale = 0.5
+        # 0.01 alright @ 1500 steps
+        noise_scale = 0.004
         background_noise = background_noise * noise_scale
 
         # Ops
@@ -1600,13 +1597,15 @@ def main(args):
                 
                     masks = F.interpolate(masks.float(), size=model_pred.shape[-2:], mode="nearest")
 
-                    masks = masks / masks.max()
                     
-                    loss = (
-                        F.mse_loss(model_pred * masks, target * masks, reduction="none")
-                        .mean([1, 2, 3])
-                        .mean()
-                    )
+                    loss = (model_pred - target).pow(2) * masks
+                    loss = loss.mean()
+                    
+                    # loss = (
+                    #     F.mse_loss(model_pred * masks, target * masks, reduction="none")
+                    #     .mean([1, 2, 3])
+                    #     .mean()
+                    # )
 
                     # loss = F.mse_loss(model_pred, target, reduction='mean')
 
