@@ -785,6 +785,12 @@ class DreamBoothDataset(Dataset):
         instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
         instance_image = exif_transpose(instance_image)
 
+
+
+        
+
+        
+
         # ADDED
 
         # weigh the clothes less so we want the strenghth to be less for clothes
@@ -793,8 +799,14 @@ class DreamBoothDataset(Dataset):
         # 0.3 too large
         # 0.05 good, but still fits too much @ 1500 steps
         # 0.01 still fits and messes up face since we eliminate too many neurons
-        # lets go back to 0.3, since it generated good faces.
-        clothes_scale = 0.3
+        # lets go back to 0.05, since it generated good faces.
+
+
+        # # (adjustment: make it completely binary, we will remove then replace with nosie like we did with BG)
+        # clothes_scale = 1
+
+        # adjustment V2, keep it back at 0.05, because moving it to 1 also changes the mask we multiply with.
+        clothes_scale = 0.05
         
         facemask, bbox = get_background_pixels_and_bbox(instance_image, mask_parts=['hair', 'skin', 'face'], bbox_padding=0)
         clothesmask, bbox = get_background_pixels_and_bbox(instance_image, mask_parts=['clothing'], bbox_padding=0)
@@ -823,6 +835,12 @@ class DreamBoothDataset(Dataset):
         # then add these two to get eroded mask of gray clothes white face
         eroded_clothes = np.zeros_like(np.array(instance_image))
         eroded_clothes[eroded_mask & (np.any(clothesmask_array != 0, axis=-1))] = [255 * clothes_scale, 255 * clothes_scale, 255 * clothes_scale]
+
+        eroded_clothes_binary = np.zeros_like(np.array(instance_image))
+        eroded_clothes_binary[eroded_mask & (np.any(clothesmask_array != 0, axis=-1))] = [255, 255, 255]
+
+
+        
         eroded_face = np.zeros_like(np.array(instance_image))
         eroded_face[eroded_mask & (np.any(facemask_array != 0, axis=-1))] = [255, 255, 255]
         combined_mask = eroded_clothes + eroded_face
@@ -839,20 +857,27 @@ class DreamBoothDataset(Dataset):
         blurred_combined_mask_image = Image.fromarray(blurred_combined_mask)
         blurred_combined_mask_tensor = self.image_transforms_mask(blurred_combined_mask_image)
 
+        
+        # ALSO BLUR THE ERODED CLOTHES MASK (JUST HORIZONTALLY)
+        blurred_clothes_mask = np.copy(eroded_clothes_binary)
+        kernel_size = (1, 5)  # (height, width) - height is 1 for horizontal blur
+        blurred_clothes_mask = cv2.GaussianBlur(blurred_clothes_mask, kernel_size, sigmaX=0)
+        blurred_clothes_mask_image = Image.fromarray(blurred_clothes_mask)
+        blurred_clothes_mask_tensor = self.image_transforms_mask(blurred_clothes_mask_image)
 
 
         # # visualize to ensure these ops are being performed correctly
         # visualization_folder = "visualization_images"
         # os.makedirs(visualization_folder, exist_ok=True)
+        # save_image(blurred_clothes_mask_tensor, os.path.join(visualization_folder, f"clothes_mask_blurring.png"))
         # save_image(blurred_combined_mask_tensor, os.path.join(visualization_folder, f"facemask_blurring.png"))
         # save_image(combined_mask_tensor, os.path.join(visualization_folder, f"facemask_erosion.png"))
         # save_image(facemask_tensor, os.path.join(visualization_folder, f"facemask.png"))
         
-        
+        example["clothes_masks"] = blurred_clothes_mask_tensor
         example["instance_images"] = instance_image_tensor
-        example["blurred_masks"] = blurred_combined_mask_tensor # and eroded
-        example["masks"] = combined_mask_tensor # (eroded)
-
+        example["blurred_masks"] = blurred_combined_mask_tensor
+        example["masks"] = combined_mask_tensor
 
 
 
@@ -930,6 +955,7 @@ def collate_fn(examples, with_prior_preservation=False, save_dir="processed_imag
 
         # ADDED
         "blurred_masks": torch.stack([example["blurred_masks"] for example in examples]),
+        "clothes_masks": torch.stack([example["clothes_masks"] for example in examples]),
         "masks": torch.stack([example["masks"] for example in examples])
     }
 
@@ -1438,7 +1464,7 @@ def main(args):
     # ADDED
 
     
-    def process_single_image(instance_image_tensor, blurred_mask):
+    def process_single_image(instance_image_tensor, blurred_mask, clothes_mask):
         # instance_image_tensor and facemask tensor has H,W 512x512 with vals between 0 and 1
 
         # facemask has already been eroded and blurred in getitem
@@ -1452,7 +1478,7 @@ def main(args):
         # BG MASK
         background_mask = 1 - blurred_mask
 
-        # BG Noise4
+        # BG Noise
         noise = torch.randn_like(instance_image_tensor)
         noise_min = noise.min()
         noise_max = noise.max()
@@ -1468,8 +1494,56 @@ def main(args):
         instance_image_tensor = instance_image_tensor * blurred_mask.float() + background_noise * background_mask.float()
 
 
-        save_path = os.path.join("masks", f"processed_image.png")
-        save_image(instance_image_tensor, save_path)
+
+        # ADD NOISE TO CLOTHES
+        
+        # generate random noise between -0.5 and 0.5
+        # (since we are putting it on top of existing values, we don't just want to add, we want to subtract too
+        #clothes_noise = torch.rand_like(instance_image_tensor) - 0.5
+
+        # actually, the intial idea was to preserve some of the details, but turns out looking at the processed
+        # images its just better to basically compeltely remove and replace with masked noise
+        # so let's just add instead of subtract.
+        
+        clothes_noise = torch.randn_like(instance_image_tensor)
+        clothes_noise_min = noise.min()
+        clothes_noise_max = noise.max()
+
+        # Normalize the noise between 0 and 1
+        clothes_noise = (clothes_noise - clothes_noise_min) / (clothes_noise_max - clothes_noise_min)
+
+        # basically do the same with the BG
+        # for clothes mask of 1, we have clothes_scale = 0.004
+
+
+
+        # TEST
+        # maybe we want to bring it up, since keeping it here means that
+        # since we are generating UNIFORM random noise between 0 and 1, basically all the noise
+        # that does not have a value of 1 are set to <0.081 * 0.05 * 255 = 0.004 * 255 = 1
+        # so essentially black pixels. Worked though for BG, wonder why.
+
+
+
+        clothes_noise_scale = 0.0045
+        clothes_noise = clothes_noise * clothes_noise_scale
+
+        
+        # Ops
+        # set clothing regions to 0, then add noise
+        instance_image_tensor = instance_image_tensor * (1-clothes_mask) + (clothes_noise * clothes_mask)
+
+
+        # don't need to clamp anymore since we just adding
+        # # then clamp the values (since we subtract + add onto exisitng values, it could go below 0 or above 1)
+        # instance_image_tensor = torch.clamp(instance_image_tensor, min=0, max=1)
+
+
+        visualization_folder = "visualization_images"
+        os.makedirs(visualization_folder, exist_ok=True)
+        save_image(instance_image_tensor, os.path.join(visualization_folder, f"process_image.png"))
+
+        
 
         # then we can norm between -1 and 1 instead of 0,1
         instance_image_tensor = (instance_image_tensor - 0.5) * 2
@@ -1499,11 +1573,12 @@ def main(args):
                 pixel_values = batch["pixel_values"]
                 blurred_masks = batch["blurred_masks"]
                 masks = batch["masks"]
+                clothes_masks = batch["clothes_masks"]
 
                 processed_images = []
                 for i in range(pixel_values.size(0)):
                     # (if you want blur, pass in blurred masks instead of masks)
-                    processed_image = process_single_image(pixel_values[i], blurred_masks[i]) #masks[i])
+                    processed_image = process_single_image(pixel_values[i], blurred_masks[i], clothes_masks[i]) #masks[i])
                     processed_images.append(processed_image)
                 
                 pixel_values = torch.stack(processed_images)
@@ -1589,26 +1664,17 @@ def main(args):
 
                     # ADDED
                     
-                
-                    masks = batch["masks"][:, 0:1, :, :] 
-                    masks = masks.to(model_pred.device)
+    
                     
-                    masks = masks.reshape(model_pred.shape[0], 1, model_pred.shape[2] * 8, model_pred.shape[3] * 8)
-                
-                    masks = F.interpolate(masks.float(), size=model_pred.shape[-2:], mode="nearest")
 
+                    # don't use mask in loss becasue using of the VAE thing it wouldn’t really make a difference as 
+                    # spatial information is not preserved when encoding the mask. So using a mask when calculating
+                    # the loss just reduces the number of weights the model knows are actually impacting the loss,
+                    # since we don’t know what the weights actually represent.
                     
-                    loss = (model_pred - target).pow(2) * masks
+                    loss = (model_pred - target).pow(2) # * masks
                     loss = loss.mean()
                     
-                    # loss = (
-                    #     F.mse_loss(model_pred * masks, target * masks, reduction="none")
-                    #     .mean([1, 2, 3])
-                    #     .mean()
-                    # )
-
-                    # loss = F.mse_loss(model_pred, target, reduction='mean')
-
                 
                 else:
                     # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
