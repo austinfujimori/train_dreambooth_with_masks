@@ -1,8 +1,10 @@
-# Changes
+# Train
 
-Final changes made to the script **train_dreambooth_person_mask.py** are under comments: # ADDED.
+Train script is in **train_dreambooth_person_mask.py**.
+
+Train and inference in **inference.ipynb**.
 
 
 # Testing
 
-Image and mask processing tests in **testing.ipynb**.
+Final inference tests in **FINAL_inference_tests.ipynb**.
